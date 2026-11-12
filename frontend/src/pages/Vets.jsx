@@ -6,6 +6,7 @@ import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { translations } from "@/data/translations";
+import { getNearbyVets } from "@/integrations/authApi";
 import "leaflet/dist/leaflet.css";
 
 // ── Custom marker icons ──────────────────────────────────────────────
@@ -35,84 +36,14 @@ function RecenterMap({ center, zoom }) {
   return null;
 }
 
-// ── Overpass API mirrors (tried in order; the primary instance is
-//    frequently overloaded/rate-limited, so we fail over to alternates
-//    instead of surfacing a dead end to the user). Limited to the
-//    long-standing, OSM-wiki-listed public mirrors — each one receives
-//    only a coarse (~1km) search center, never the user's exact fix ──
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.openstreetmap.ru/api/interpreter",
-];
-
-async function queryOverpass(query, endpoint, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    // GET with the query in the URL — this is how browser-based Overpass
-    // clients (overpass-turbo, countless Leaflet demos) have reliably
-    // queried these public mirrors cross-origin for years. A POST body
-    // is more prone to being CORS-blocked on mirrors that only allow
-    // simple GETs cross-origin.
-    const res = await fetch(`${endpoint}?data=${encodeURIComponent(query)}`, {
-      signal: controller.signal,
-    });
-    if (!res.ok) throw new Error(`Overpass responded ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-// ── Fetch nearby vets from Overpass API ──────────────────────────────
+// ── Fetch nearby vets — proxied through our own backend ──────────────
+// Public Overpass mirrors started rejecting direct browser requests
+// (406 at the edge, reproduced on every mirror we tried), so the lookup
+// now goes through /api/vets/nearby, which queries Overpass server-side
+// and fails over across mirrors there instead.
 async function fetchNearbyVets(lat, lon, radiusMeters = 10000) {
-  // Round to ~1km before it leaves the browser — plenty precise for a
-  // 10km radius search, and keeps the user's exact fix off third-party
-  // Overpass mirrors. Precise coords never leave the client otherwise.
-  const searchLat = Math.round(lat * 100) / 100;
-  const searchLon = Math.round(lon * 100) / 100;
-  const query = `
-    [out:json][timeout:15];
-    (
-      node["amenity"="veterinary"](around:${radiusMeters},${searchLat},${searchLon});
-      way["amenity"="veterinary"](around:${radiusMeters},${searchLat},${searchLon});
-    );
-    out center body;
-  `;
-
-  let data = null;
-  let lastError = null;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      data = await queryOverpass(query, endpoint);
-      break;
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  if (!data) {
-    throw lastError || new Error("Failed to fetch vet data");
-  }
-
-  return data.elements.map((el) => {
-    const lat = el.lat ?? el.center?.lat;
-    const lon = el.lon ?? el.center?.lon;
-    const tags = el.tags || {};
-    return {
-      id: el.id,
-      lat,
-      lon,
-      name: tags.name || "Veterinary Clinic",
-      address:
-        [tags["addr:street"], tags["addr:housenumber"], tags["addr:city"]]
-          .filter(Boolean)
-          .join(", ") || tags["addr:full"] || "",
-      phone: tags.phone || tags["contact:phone"] || "",
-      hours: tags.opening_hours || "",
-      website: tags.website || tags["contact:website"] || "",
-    };
-  });
+  const res = await getNearbyVets(lat, lon, radiusMeters);
+  return res.data.vets;
 }
 
 // ── Distance helper ──────────────────────────────────────────────────

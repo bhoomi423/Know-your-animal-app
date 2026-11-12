@@ -1209,6 +1209,86 @@ def delete_animal_disease(slug, disease_id):
     return jsonify({'message': 'Disease deleted'}), 200
 
 
+# ── Vets (nearby clinics via Overpass) ─────────────────────────
+# Queried server-side rather than from the browser: public Overpass
+# mirrors have started rejecting direct cross-origin browser requests
+# (406 from the edge, seen on every mirror we tried), while plain
+# server-to-server requests are unaffected. This also means a user's
+# exact location is rounded before it ever reaches a third party.
+
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
+
+
+@app.route('/api/vets/nearby', methods=['GET'])
+def nearby_vets():
+    try:
+        lat = float(request.args.get('lat'))
+        lon = float(request.args.get('lon'))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'lat and lon query params are required'}), 400
+
+    try:
+        radius = int(request.args.get('radius', 10000))
+    except (TypeError, ValueError):
+        radius = 10000
+    radius = max(1000, min(radius, 25000))
+
+    # ~1km precision is plenty for a multi-km radius search.
+    search_lat = round(lat, 2)
+    search_lon = round(lon, 2)
+
+    query = (
+        '[out:json][timeout:15];'
+        f'(node["amenity"="veterinary"](around:{radius},{search_lat},{search_lon});'
+        f'way["amenity"="veterinary"](around:{radius},{search_lat},{search_lon}););'
+        'out center body;'
+    )
+
+    data = None
+    last_error = None
+    for endpoint in OVERPASS_ENDPOINTS:
+        try:
+            # 8s * 3 mirrors stays under gunicorn's 30s worker timeout
+            resp = requests.get(endpoint, params={'data': query}, timeout=8)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if data is None:
+        logger.error(f"All Overpass mirrors failed: {last_error}")
+        return jsonify({'message': 'Failed to fetch nearby vets. Please try again later.'}), 502
+
+    vets = []
+    for el in data.get('elements', []):
+        el_lat = el.get('lat') or (el.get('center') or {}).get('lat')
+        el_lon = el.get('lon') or (el.get('center') or {}).get('lon')
+        if el_lat is None or el_lon is None:
+            continue
+        tags = el.get('tags', {}) or {}
+        address = ", ".join(filter(None, [
+            tags.get('addr:street'), tags.get('addr:housenumber'), tags.get('addr:city')
+        ])) or tags.get('addr:full', '')
+        vets.append({
+            'id': el.get('id'),
+            'lat': el_lat,
+            'lon': el_lon,
+            'name': tags.get('name', 'Veterinary Clinic'),
+            'address': address,
+            'phone': tags.get('phone') or tags.get('contact:phone', ''),
+            'hours': tags.get('opening_hours', ''),
+            'website': tags.get('website') or tags.get('contact:website', ''),
+        })
+
+    return jsonify({'vets': vets}), 200
+
+
 # ── Chat ────────────────────────────────────────────────────────
 
 def generate_fallback_vet_response(messages):

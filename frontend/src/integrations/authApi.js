@@ -165,4 +165,8 @@ export const verifySubscriptionPayment = (paymentData) => api.post("/subscriptio
 export const getMyInvoices = () => api.get("/subscription/invoices");
 export const resetSubscription = () => api.post("/subscription/reset");
 
+// ── Vets API calls ────────────────────────────────────────────────────────
+export const getNearbyVets = (lat, lon, radius = 10000) =>
+    api.get("/vets/nearby", { params: { lat, lon, radius } });
+
 export default api;
