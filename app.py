@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, make_response, Response, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 import secrets
@@ -61,6 +63,11 @@ allowed_origins = [
 if client_url and client_url not in allowed_origins:
     allowed_origins.append(client_url)
 CORS(app, supports_credentials=True, origins=allowed_origins)
+
+# Per-IP limiter (in-memory storage — fine for the single gunicorn
+# worker this app runs). No default_limits: only routes that opt in
+# via @limiter.limit(...) are restricted.
+limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
 
 db = SQLAlchemy(app)
 
@@ -1222,8 +1229,15 @@ OVERPASS_ENDPOINTS = [
     "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
+# Short-lived cache so repeat/nearby-duplicate requests (map re-renders,
+# multiple users in the same area) don't each trigger a fresh round of
+# slow outbound calls. Keyed on the already-rounded search coordinates.
+_VETS_CACHE = {}
+_VETS_CACHE_TTL = 600  # seconds
+
 
 @app.route('/api/vets/nearby', methods=['GET'])
+@limiter.limit("15 per minute")
 def nearby_vets():
     try:
         lat = float(request.args.get('lat'))
@@ -1240,6 +1254,11 @@ def nearby_vets():
     # ~1km precision is plenty for a multi-km radius search.
     search_lat = round(lat, 2)
     search_lon = round(lon, 2)
+
+    cache_key = (search_lat, search_lon, radius)
+    cached = _VETS_CACHE.get(cache_key)
+    if cached and (time.time() - cached[0]) < _VETS_CACHE_TTL:
+        return jsonify({'vets': cached[1]}), 200
 
     query = (
         '[out:json][timeout:15];'
@@ -1286,6 +1305,7 @@ def nearby_vets():
             'website': tags.get('website') or tags.get('contact:website', ''),
         })
 
+    _VETS_CACHE[cache_key] = (time.time(), vets)
     return jsonify({'vets': vets}), 200
 
 
