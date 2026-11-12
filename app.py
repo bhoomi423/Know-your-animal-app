@@ -1286,7 +1286,7 @@ def nearby_vets():
     )
 
     data = None
-    last_error = None
+    errors = []
     for endpoint in OVERPASS_ENDPOINTS:
         try:
             # 8s * 3 mirrors stays under gunicorn's 30s worker timeout
@@ -1295,11 +1295,11 @@ def nearby_vets():
             data = resp.json()
             break
         except Exception as exc:
-            last_error = exc
+            errors.append(f"{endpoint} -> {type(exc).__name__}: {exc}")
             continue
 
     if data is None:
-        logger.error(f"All Overpass mirrors failed: {last_error}")
+        logger.error("All Overpass mirrors failed:\n  " + "\n  ".join(errors))
         return jsonify({'message': 'Failed to fetch nearby vets. Please try again later.'}), 502
 
     vets = []
