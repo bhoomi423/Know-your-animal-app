@@ -1238,7 +1238,9 @@ def delete_animal_disease(slug, disease_id):
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.monicz.dev/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://overpass.openstreetmap.fr/api/interpreter",
 ]
 
 # Short-lived, size-bounded cache so repeat/nearby-duplicate requests
@@ -1289,8 +1291,8 @@ def nearby_vets():
     errors = []
     for endpoint in OVERPASS_ENDPOINTS:
         try:
-            # 8s * 3 mirrors stays under gunicorn's 30s worker timeout
-            resp = requests.get(endpoint, params={'data': query}, timeout=8)
+            # 5s * 5 mirrors stays under gunicorn's 30s worker timeout
+            resp = requests.get(endpoint, params={'data': query}, timeout=5)
             resp.raise_for_status()
             data = resp.json()
             break
