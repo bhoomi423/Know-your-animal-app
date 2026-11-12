@@ -1238,9 +1238,12 @@ def delete_animal_disease(slug, disease_id):
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.monicz.dev/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter",
-    "https://overpass.openstreetmap.fr/api/interpreter",
+    # Removed: overpass.monicz.dev (307-redirects to the same backend as
+    # kumi.systems/private.coffee — same DNS target, not an independent
+    # mirror); overpass.osm.ch (confirmed broken — returns 200 with an
+    # empty element list and a bogus timestamp_osm_base for *any* query,
+    # anywhere in the world, so it silently "succeeds" with no data);
+    # overpass.openstreetmap.fr (explicit 403, whitelist-only access).
 ]
 
 # Short-lived, size-bounded cache so repeat/nearby-duplicate requests
@@ -1291,10 +1294,19 @@ def nearby_vets():
     errors = []
     for endpoint in OVERPASS_ENDPOINTS:
         try:
-            # 5s * 5 mirrors stays under gunicorn's 30s worker timeout
-            resp = requests.get(endpoint, params={'data': query}, timeout=5)
+            # timeout budget sized to stay under gunicorn's 30s worker timeout
+            resp = requests.get(endpoint, params={'data': query}, timeout=8)
             resp.raise_for_status()
-            data = resp.json()
+            candidate = resp.json()
+            # A broken mirror can still answer 200 with a well-formed-looking
+            # but empty/bogus payload (seen in practice: valid JSON shape,
+            # zero elements for every query anywhere, non-date timestamp).
+            # Treat a non-ISO-date timestamp_osm_base as a failed attempt
+            # rather than trusting it and stopping the failover here.
+            timestamp = str(candidate.get('osm3s', {}).get('timestamp_osm_base', ''))
+            if not re.match(r'^\d{4}-\d{2}-\d{2}T', timestamp):
+                raise ValueError(f"suspicious response (timestamp_osm_base={timestamp!r})")
+            data = candidate
             break
         except Exception as exc:
             errors.append(f"{endpoint} -> {type(exc).__name__}: {exc}")
