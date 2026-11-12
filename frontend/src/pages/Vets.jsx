@@ -35,6 +35,33 @@ function RecenterMap({ center, zoom }) {
   return null;
 }
 
+// ── Overpass API mirrors (tried in order; the primary instance is
+//    frequently overloaded/rate-limited, so we fail over to alternates
+//    instead of surfacing a dead end to the user) ─────────────────────
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.openstreetmap.ru/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+];
+
+async function queryOverpass(query, endpoint, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: query,
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Overpass responded ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Fetch nearby vets from Overpass API ──────────────────────────────
 async function fetchNearbyVets(lat, lon, radiusMeters = 10000) {
   const query = `
@@ -45,10 +72,20 @@ async function fetchNearbyVets(lat, lon, radiusMeters = 10000) {
     );
     out center body;
   `;
-  const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Failed to fetch vet data");
-  const data = await res.json();
+
+  let data = null;
+  let lastError = null;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      data = await queryOverpass(query, endpoint);
+      break;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (!data) {
+    throw lastError || new Error("Failed to fetch vet data");
+  }
 
   return data.elements.map((el) => {
     const lat = el.lat ?? el.center?.lat;
