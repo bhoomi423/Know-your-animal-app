@@ -37,12 +37,13 @@ function RecenterMap({ center, zoom }) {
 
 // ── Overpass API mirrors (tried in order; the primary instance is
 //    frequently overloaded/rate-limited, so we fail over to alternates
-//    instead of surfacing a dead end to the user) ─────────────────────
+//    instead of surfacing a dead end to the user). Limited to the
+//    long-standing, OSM-wiki-listed public mirrors — each one receives
+//    only a coarse (~1km) search center, never the user's exact fix ──
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.openstreetmap.ru/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
 ];
 
 async function queryOverpass(query, endpoint, timeoutMs = 12000) {
@@ -64,11 +65,16 @@ async function queryOverpass(query, endpoint, timeoutMs = 12000) {
 
 // ── Fetch nearby vets from Overpass API ──────────────────────────────
 async function fetchNearbyVets(lat, lon, radiusMeters = 10000) {
+  // Round to ~1km before it leaves the browser — plenty precise for a
+  // 10km radius search, and keeps the user's exact fix off third-party
+  // Overpass mirrors. Precise coords never leave the client otherwise.
+  const searchLat = Math.round(lat * 100) / 100;
+  const searchLon = Math.round(lon * 100) / 100;
   const query = `
     [out:json][timeout:15];
     (
-      node["amenity"="veterinary"](around:${radiusMeters},${lat},${lon});
-      way["amenity"="veterinary"](around:${radiusMeters},${lat},${lon});
+      node["amenity"="veterinary"](around:${radiusMeters},${searchLat},${searchLon});
+      way["amenity"="veterinary"](around:${radiusMeters},${searchLat},${searchLon});
     );
     out center body;
   `;
