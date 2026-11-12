@@ -10,6 +10,8 @@ from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
+from cachetools import TTLCache
 import jwt
 import secrets
 import json
@@ -21,6 +23,16 @@ load_dotenv()
 app = Flask(__name__, static_folder='frontend/dist', static_url_path='/')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Requests reach this app through Render's own load balancer (always one
+# hop) and, for browser traffic, also through Vercel's rewrite proxy in
+# front of that. Without this, request.remote_addr is just the nearest
+# proxy's IP for every request, which collapses all callers into one
+# bucket for anything keyed on IP (e.g. the rate limiter below).
+# x_for=1 trusts one hop — correct for direct-to-Render traffic; if the
+# Vercel-rewritten path turns out to add a second hop in your logs,
+# bump this to 2.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # Database configuration (PostgreSQL & SQLite support)
 raw_db_uri = os.environ.get("DATABASE_URL", "sqlite:///app.db").strip().strip('"').strip("'")
@@ -1229,11 +1241,14 @@ OVERPASS_ENDPOINTS = [
     "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 
-# Short-lived cache so repeat/nearby-duplicate requests (map re-renders,
-# multiple users in the same area) don't each trigger a fresh round of
-# slow outbound calls. Keyed on the already-rounded search coordinates.
-_VETS_CACHE = {}
+# Short-lived, size-bounded cache so repeat/nearby-duplicate requests
+# (map re-renders, multiple users in the same area) don't each trigger a
+# fresh round of slow outbound calls. Bounded with maxsize so varying
+# the key (lat/lon/radius) can't grow this without limit — oldest
+# entries are evicted once full, regardless of TTL.
 _VETS_CACHE_TTL = 600  # seconds
+_VETS_CACHE = TTLCache(maxsize=1000, ttl=_VETS_CACHE_TTL)
+_RADIUS_BUCKETS = [1000, 2500, 5000, 10000, 15000, 20000, 25000]
 
 
 @app.route('/api/vets/nearby', methods=['GET'])
@@ -1249,7 +1264,10 @@ def nearby_vets():
         radius = int(request.args.get('radius', 10000))
     except (TypeError, ValueError):
         radius = 10000
-    radius = max(1000, min(radius, 25000))
+    # Snap to a fixed set of buckets rather than clamping to a raw range
+    # — keeps the cache/key space small regardless of what a caller
+    # sends, and the actual search radius only needs to be this precise.
+    radius = min(_RADIUS_BUCKETS, key=lambda b: abs(b - radius))
 
     # ~1km precision is plenty for a multi-km radius search.
     search_lat = round(lat, 2)
@@ -1257,8 +1275,8 @@ def nearby_vets():
 
     cache_key = (search_lat, search_lon, radius)
     cached = _VETS_CACHE.get(cache_key)
-    if cached and (time.time() - cached[0]) < _VETS_CACHE_TTL:
-        return jsonify({'vets': cached[1]}), 200
+    if cached is not None:
+        return jsonify({'vets': cached}), 200
 
     query = (
         '[out:json][timeout:15];'
@@ -1305,7 +1323,7 @@ def nearby_vets():
             'website': tags.get('website') or tags.get('contact:website', ''),
         })
 
-    _VETS_CACHE[cache_key] = (time.time(), vets)
+    _VETS_CACHE[cache_key] = vets
     return jsonify({'vets': vets}), 200
 
 
