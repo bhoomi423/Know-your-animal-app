@@ -50,10 +50,12 @@ async function queryOverpass(query, endpoint, timeoutMs = 12000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: query,
+    // GET with the query in the URL — this is how browser-based Overpass
+    // clients (overpass-turbo, countless Leaflet demos) have reliably
+    // queried these public mirrors cross-origin for years. A POST body
+    // is more prone to being CORS-blocked on mirrors that only allow
+    // simple GETs cross-origin.
+    const res = await fetch(`${endpoint}?data=${encodeURIComponent(query)}`, {
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`Overpass responded ${res.status}`);
